@@ -77,10 +77,66 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
+
+static inline void set_mask(char *mask, int loc) {
+  // mask[loc / 8] = mask[loc / 8] | (1 << (7 - loc % 8));
+  mask[loc >> 3] = mask[loc >> 3] | (1 << (loc & 0x7));
+}
+
+// max number of ptes could check
+#define MAX_CHECK_NUM (1024 >> 3)
+
+// copy from vm.c
+extern pte_t * walk(pagetable_t pagetable, uint64 va, int alloc);
+
 int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  // arg 1: start virtual address
+  // arg 2: check number of pages
+  // arg 3: mask whick store check result, and the least significant bit corresponds to the first page
+  char mask[MAX_CHECK_NUM];
+  uint64 va;
+  int len;
+  char *output;
+  pte_t *pte;
+  pagetable_t pagetable = myproc()->pagetable;
+
+  memset(mask, 0, sizeof(mask));
+  
+  // read args, using argaddr argint
+  if (argaddr(0, &va) < 0) {
+    return -1;
+  }
+
+  if (argint(1, &len) < 0) {
+    return -1;
+  }
+
+  if (argaddr(2, (uint64 *)&output) < 0) {
+    return -1;
+  }
+  
+  // use walk to check e ptes which meets condition
+  for (int i = 0; i < len; ++i) {
+    pte = walk(pagetable, va, 0);
+    va += PGSIZE;
+    if (pte == 0) {
+      continue; 
+    }
+    if ((PTE_FLAGS(*pte) & PTE_A) && (PTE_FLAGS(*pte) & PTE_V)) {
+      // clear pte_a after access, otherwise it could extist forever
+      *pte = *pte & ~(PTE_A);
+      set_mask(mask, i);
+    }
+  }
+
+  // write check result to output buffer
+  if (copyout(pagetable, (uint64)output, mask, (len + 7) / 8) < 0) {
+    return -1;
+  }
+
   return 0;
 }
 #endif

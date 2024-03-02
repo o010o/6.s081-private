@@ -95,6 +95,9 @@ struct proc {
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
+#ifdef LAB_PGTBL
+  struct usyscall *usyscall;   // syscall
+#endif
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack

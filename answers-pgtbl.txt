@@ -1,0 +1,6 @@
+pte of page1 is 0x0000000021fda00f, so the permission of page 1 is V|R|W|X, 
+does not contain u,so a user process could not read or write this page
+
+page 0 is segment  of init
+
+page 2 is stack of process
