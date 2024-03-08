@@ -29,6 +29,34 @@ trapinithart(void)
   w_stvec((uint64)kernelvec);
 }
 
+extern pte_t * walk(pagetable_t pagetable, uint64 va, int alloc);
+
+int alloc_and_copy(pagetable_t pagetable, uint64 va) {
+  pte_t *pte = walkpte(pagetable, va);
+  if (pte == 0 || !(*pte & PTE_S)) {
+    // invalid write
+    // printf("alloc_and_copy: unexpected scause %p\n", r_scause());
+    // printf("            sepc=%p stval=%p\n", r_sepc(), va);
+    // printf("level2:%d,level1:%d,level0:%d\n", PX(2, va), PX(1, va), PX(0, va));
+    exit(-1);
+  } 
+
+  // using PTE_S to distinguish whether a page can be write or not. A page can be write if PTE_S was setted.
+  // alloc a new page, copy old to new, and set PTE_W
+  char *mem = kalloc();
+  if (mem == 0) {
+    return -1;
+  }
+
+  uint64 old = PTE2PA(*pte);
+  memmove(mem, (void *)old, PGSIZE);
+  uint64 flags = PTE_FLAGS(*pte);
+  uvmunmap(pagetable, PGROUNDDOWN(va), 1, 1);
+
+  kvmmap(pagetable, PGROUNDDOWN(va), (uint64)mem, PGSIZE, (flags & (~PTE_S)) | PTE_W);
+  return 0;
+}
+
 //
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
@@ -46,7 +74,7 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
@@ -65,11 +93,23 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if (r_scause() == 15) {
+
+    // stval
+    // If stval is written with a nonzero value when a breakpoint, address-misaligned, access-fault, or
+    // page-fault exception occurs on an instruction fetch, load, or store, then stval will contain the
+    // faulting virtual address.
+    // the process is writing a page shared by multiple processes, alloc a new physics page for it
+    if (alloc_and_copy(p->pagetable, r_stval()) < 0) {
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    uint64 va = r_stval();
+    printf("level2:%d,level1:%d,level0:%d\n", PX(2, va), PX(1, va), PX(0, va));
     p->killed = 1;
   }
 

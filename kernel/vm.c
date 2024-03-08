@@ -15,6 +15,60 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+static void print_page_table_inner(pagetable_t table, int cur_level, uint64 *output) {
+  if (cur_level >= 3) {
+    return;
+  }
+  if (cur_level == 0) {
+    printf("table:%p\n", table);
+  }
+
+  if (*output == 0) {
+    return;
+  }
+
+  for (int i = 0; i < 512 && *output > 0; ++i) {
+    pte_t pte = table[i];
+    if (pte & PTE_V) {
+      *output = *output - 1;
+      for (int j = 1; j <= cur_level; ++j) {
+          printf("  ");
+      }
+      printf("%d : pte:%p, pa:%p", i, pte, PTE2PA(pte));
+      if (cur_level == 2) {
+        printf(" ");
+        if( pte & PTE_S) {
+          printf("S");
+        }
+        if (pte & PTE_U) {
+          printf("U");
+        }
+        if (pte & PTE_X) {
+          printf("X");
+        }
+        if (pte & PTE_W) {
+          printf("W");
+        }
+        if (pte & PTE_R) {
+          printf("R");
+        }
+        if (pte & PTE_V) {
+          printf("V");
+        }
+        printf(" ref:%d", get_reference(PTE2PA(pte)));
+      }
+      printf("\n");
+
+      print_page_table_inner((pagetable_t)PTE2PA(pte), cur_level + 1, output);
+    }
+  }
+}
+
+void print_page_table(pagetable_t table, int cur_level, uint64 output) {
+  return print_page_table_inner(table, cur_level, &output);
+}
+
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -95,6 +149,24 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
     }
   }
   return &pagetable[PX(0, va)];
+}
+
+pte_t * walkpte(pagetable_t pagetable, uint64 va) {
+
+  pte_t *pte;
+
+  if(va >= MAXVA)
+    return 0;
+
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  if((*pte & PTE_U) == 0)
+    return 0;
+
+  return pte;
 }
 
 // Look up a virtual address, return the physical address,
@@ -300,31 +372,34 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
-  pte_t *pte;
-  uint64 pa, i;
-  uint flags;
-  char *mem;
-
-  for(i = 0; i < sz; i += PGSIZE){
-    if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
-    if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
-    pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
-    }
+  if (old == new) {
+    panic("uvmcopy: why does process copy same pagetable?");
   }
-  return 0;
+  // FIXME:share physics rather than page table!
+  pte_t *old_pte;
+  pte_t *new_pte;
+  // clear PTE_W, set PTE_S if PTE_R exists,ready for copy-on-write
+  for (int i = 0; i < sz; i += PGSIZE) {
+    if((old_pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: old_pte should exist");
+    if((*old_pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+    if (*old_pte & PTE_W) {
+      *old_pte = *old_pte | (PTE_S);
+      *old_pte = *old_pte & (~PTE_W);
+    }
 
- err:
-  uvmunmap(new, 0, i / PGSIZE, 1);
-  return -1;
+    new_pte = walk(new, i, 1);
+    if (*new_pte & PTE_V) {
+      panic("uvmcopy: non-empty pagetable");
+    }
+
+    *new_pte = *old_pte;
+
+    change_reference(PTE2PA(*old_pte), 1);
+  }
+
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -346,22 +421,41 @@ uvmclear(pagetable_t pagetable, uint64 va)
 int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
-  uint64 n, va0, pa0;
+  uint64 n, va0;
+  pte_t *pte;
+  uint64 pa;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+
+    pte = walkpte(pagetable, va0);
+    if (pte == 0) {
       return -1;
+    }
+    if ((*pte & PTE_S) != 0) {
+      // shared memory, need to alloc a new physics memory
+      int err = alloc_and_copy(pagetable, va0);
+      if (err < 0) {
+        return -1;
+      }
+      continue;
+    }
+
+    pa = PTE2PA(*pte);
+
+    if(pa == 0) {
+      return -1;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
-    memmove((void *)(pa0 + (dstva - va0)), src, n);
+    memmove((void *)(pa + (dstva - va0)), src, n);
 
     len -= n;
     src += n;
     dstva = va0 + PGSIZE;
   }
+
   return 0;
 }
 
