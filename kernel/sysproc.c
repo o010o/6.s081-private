@@ -67,8 +67,10 @@ sys_sleep(void)
       release(&tickslock);
       return -1;
     }
+
     sleep(&ticks, &tickslock);
   }
+  backtrace();
   release(&tickslock);
   return 0;
 }

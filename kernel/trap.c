@@ -70,6 +70,7 @@ usertrap(void)
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    backtrace();
     p->killed = 1;
   }
 
@@ -77,8 +78,21 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    if (p->interval != 0) {
+      p->ticks = p->ticks + 1;
+      if (p->ticks % p->interval == 0 && p->is_handling == 0) {
+        p->is_handling = 1;
+        // register ra stores the instruction of user process, so process return to user process after p->alarm_handler return
+        // i:s1, j:
+        memmove(p->interruptframe, p->trapframe, sizeof(struct trapframe));       
+        p->trapframe->epc = p->alarm_handler;
+      }
+    } else {
+      p->ticks = 0;
+    }
     yield();
+  }
 
   usertrapret();
 }

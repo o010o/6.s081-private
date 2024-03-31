@@ -135,6 +135,18 @@ found:
     return 0;
   }
 
+  if ((p->interruptframe = (struct trapframe *)kalloc()) == 0) {
+    freeproc(p);
+    release(&p->lock);
+    kfree(p->trapframe);
+    return 0;
+  }
+
+  p->is_handling = 0;
+  p->alarm_handler = 0;
+  p->ticks = 0;
+  p->interval = 0;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -153,6 +165,12 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
+  if (p->interruptframe) {
+    kfree((void *)p->interruptframe);
+  }
+  p->interruptframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -653,4 +671,31 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64 sys_sigalarm(void) 
+{
+  int interval;
+  uint64 handler;
+  if (argint(0, &interval) < 0 || argaddr(1, &handler) < 0) {
+    return -1;
+  }
+
+  struct proc *p = myproc();
+  p->is_handling = 0;
+  p->alarm_handler = handler;
+  p->interval = interval;
+  p->ticks = 0;
+
+  return 0;
+}
+
+uint64 sys_sigreturn(void) 
+{
+  struct proc *p = myproc();
+
+  memmove(p->trapframe, p->interruptframe, sizeof(struct trapframe));       
+  p->is_handling = 0;
+
+  return 0;
 }
