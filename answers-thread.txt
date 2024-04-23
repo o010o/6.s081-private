@@ -1,0 +1,3 @@
+We would loss some insert operation if we have two thread.
+
+if two threads execute *p = e at ph.c:36 with same i at same time, then one insert would loss.

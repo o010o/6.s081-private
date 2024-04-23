@@ -4,8 +4,10 @@
 #include <assert.h>
 #include <pthread.h>
 
-static int nthread = 1;
-static int round = 0;
+static int nthread = 1;   // number of total thread
+static int round = 0;     // the latest round
+
+static int next_nthread = 0;
 
 struct barrier {
   pthread_mutex_t barrier_mutex;
@@ -25,12 +27,36 @@ barrier_init(void)
 static void 
 barrier()
 {
-  // YOUR CODE HERE
   //
   // Block until all threads have called barrier() and
   // then increment bstate.round.
   //
-  
+  pthread_mutex_lock(&bstate.barrier_mutex);
+
+  if (round == bstate.round) {
+    ++bstate.nthread;
+    if (nthread == bstate.nthread) {
+      // 
+      ++bstate.round;
+      pthread_cond_broadcast(&bstate.barrier_cond);
+    } else {
+      pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+    }
+  } else {
+    // race thread reach, store its count, then go to sleep
+    ++next_nthread;
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+
+  --bstate.nthread;
+
+  if (bstate.nthread == 0) {
+    ++round;
+    bstate.nthread = next_nthread;
+    next_nthread = 0;
+  }
+
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
