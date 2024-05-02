@@ -113,7 +113,6 @@ sockread(struct sock *si, uint64 addr, int n)
   struct proc *pr = myproc();
   struct mbuf *m;
   int len;
-
   acquire(&si->lock);
   while (mbufq_empty(&si->rxq) && !pr->killed) {
     sleep(&si->rxq, &si->lock);
@@ -164,7 +163,6 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   // registered to handle it.
   //
   struct sock *si;
-
   acquire(&lock);
   si = sockets;
   while (si) {

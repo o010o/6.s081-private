@@ -102,7 +102,33 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  
+  acquire(&e1000_lock);
+
+  // failed if there is a uncompleted transmit
+  uint32 idx_n = regs[E1000_TDT];
+  if (tx_mbufs[idx_n] != 0 && tx_ring[idx_n].status != E1000_TXD_STAT_DD) {
+    printf("no free desciptor for transmit\n");
+    release(&e1000_lock);
+
+    return -1;
+  }
+
+  // free last completed mbuf if there is one
+  if (tx_mbufs[idx_n]) {
+    mbuffree(tx_mbufs[idx_n]);
+  }
+
+  // set transmit descriptor
+  tx_ring[idx_n].addr = (uint64) m->head;
+  tx_ring[idx_n].length = m->len;
+  tx_ring[idx_n].cmd =  E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;  
+
+  tx_mbufs[idx_n] = m;
+
+  regs[E1000_TDT] = (idx_n + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
+
   return 0;
 }
 
@@ -115,6 +141,51 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  struct mbuf *recv_mbufs[RX_RING_SIZE];
+  uint32 recv_num = 0;
+  acquire(&e1000_lock);
+
+  // retrive all receivable packets
+  uint32 new_rdt = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  while (recv_num < RX_RING_SIZE) {
+    if ((rx_ring[new_rdt].status & E1000_RXD_STAT_DD) == 0) {
+      break;
+    } 
+
+    recv_mbufs[recv_num] = rx_mbufs[new_rdt];
+    recv_mbufs[recv_num]->len = rx_ring[new_rdt].length;
+    ++recv_num;
+
+    rx_mbufs[new_rdt] = mbufalloc(0);
+    if (!rx_mbufs[new_rdt]) {
+      panic("e1000_recv mbufalloc");
+    }
+
+    rx_ring[new_rdt].addr = (uint64) rx_mbufs[new_rdt]->head;
+    rx_ring[new_rdt].status = 0;
+
+    uint32 next = (new_rdt + 1) % RX_RING_SIZE;
+    if (next == regs[E1000_RDH]) {
+      // all receivable packets had been retrived
+      break;
+    }
+    new_rdt = next;
+  }
+  
+  if (recv_num == 0) {
+    printf("no receivable packet, rdt:%d, rdh:%d", regs[E1000_RDT], regs[E1000_RDH]);
+    release(&e1000_lock);
+    return;
+  }
+
+  regs[E1000_RDT] = new_rdt;
+  
+  release(&e1000_lock);
+  
+  for (uint32 i = 0; i < recv_num; ++i) {
+    net_rx(recv_mbufs[i]);
+  }
 }
 
 void
