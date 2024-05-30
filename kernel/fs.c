@@ -380,6 +380,10 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  if (bn >= MAXFILE) {
+    panic("bmap: out of range");
+  }
+
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
@@ -401,7 +405,83 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  bn -= NINDIRECT;
+
+  if (bn < NINDIRECT * NINDIRECT) {
+    // get double indirect block
+    addr = ip->addrs[NDIRECT + 1];
+    if (addr == 0) {
+      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
+    }
+
+    // get single indirect block
+    struct buf *double_indir_buf = bread(ip->dev, addr);
+    uint *single_indir_bnos = (uint *)double_indir_buf->data;
+
+    uint indir_bno = bn / NINDIRECT;
+    addr = single_indir_bnos[indir_bno];
+    if (addr == 0) {
+      single_indir_bnos[indir_bno] = addr = balloc(ip->dev);
+      log_write(double_indir_buf);
+    }
+    brelse(double_indir_buf);
+
+    // get data block
+    struct buf *single_indir_buf = bread(ip->dev, addr);
+    uint *data_bnos = (uint *)single_indir_buf->data;
+
+    uint data_bno = bn % NINDIRECT;
+    addr = data_bnos[data_bno];
+    if (addr == 0) {
+      data_bnos[data_bno] = addr = balloc(ip->dev);
+      log_write(single_indir_buf);
+    }
+    brelse(single_indir_buf);
+
+    return addr;
+  }
+
   panic("bmap: out of range");
+}
+
+static void free_single(struct inode *ip, uint bno) {
+  if (bno == 0) {
+    return;
+  }
+
+  struct buf *buf = bread(ip->dev, bno);
+  if (buf == 0) {
+    panic("free_single:bread");
+  }
+  uint *del_bnos = (uint *)buf->data;
+  for (int i = 0; i < NINDIRECT; ++i) {
+    if (del_bnos[i]) {
+      bfree(ip->dev, del_bnos[i]);
+    }
+  }
+  brelse(buf);
+  bfree(ip->dev, bno);
+}
+
+static void free_double(struct inode *ip, uint bno) {
+  if (bno == 0) {
+    return;
+  }
+
+  struct buf *buf = bread(ip->dev, bno);
+  if (buf == 0) {
+    panic("free_double:bread");
+  }
+
+  uint *del_bnos = (uint *)buf->data;
+  for (int i = 0; i < NINDIRECT; ++i) {
+    if (del_bnos[i]) {
+      free_single(ip, del_bnos[i]);
+      del_bnos[i] = 0;
+    }
+  }
+  brelse(buf);
+  bfree(ip->dev, bno);
 }
 
 // Truncate inode (discard contents).
@@ -409,9 +489,9 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
-  struct buf *bp;
-  uint *a;
+  int i;
+  // struct buf *bp;
+  // uint *a;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -421,15 +501,48 @@ itrunc(struct inode *ip)
   }
 
   if(ip->addrs[NDIRECT]){
-    bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
-    for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
-        bfree(ip->dev, a[j]);
-    }
-    brelse(bp);
-    bfree(ip->dev, ip->addrs[NDIRECT]);
+    free_single(ip, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+
+    // bp = bread(ip->dev, ip->addrs[NDIRECT]);
+    // a = (uint*)bp->data;
+    // for(j = 0; j < NINDIRECT; j++){
+    //   if(a[j])
+    //     bfree(ip->dev, a[j]);
+    // }
+    // brelse(bp);
+    // bfree(ip->dev, ip->addrs[NDIRECT]);
+    // ip->addrs[NDIRECT] = 0;
+  }
+
+  if (ip->addrs[NDIRECT + 1]) {
+    // TODO:free double-indeirect block
+    free_double(ip, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
+
+    // struct buf *double_indir_buf = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    // struct buf *tmp = 0;
+    // uint d_num = 0;
+
+    // a = (uint *)double_indir_buf->data;
+    // for (i = 0; i < NINDIRECT; ++i) {
+    //   d_num = a[i];
+    //   if (d_num) {
+    //     tmp = bread(ip->dev, d_num);
+    //     for (j = 0; j < NINDIRECT; ++j) {
+    //       if (tmp->data[j]) {
+    //         bfree(ip->dev, tmp->data[j]);
+    //         tmp->data[j] = 0;
+    //       }
+    //     }
+    //     brelse(tmp);
+    //     bfree(ip->dev, d_num);
+    //   }
+    // }
+
+    // brelse(double_indir_buf);
+    // bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    // ip->addrs[NDIRECT + 1];
   }
 
   ip->size = 0;
