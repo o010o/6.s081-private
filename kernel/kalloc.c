@@ -82,14 +82,34 @@ kfree(void *pa)
 void *kalloc_from_mem_pool(int id) {
   struct run *r;
 
+  // acquire memory from current cpu
   acquire(&kmems[id].lock);
   r = kmems[id].freelist;
-  if(r)
+  if (r) {
     kmems[id].freelist = r->next;
+    release(&kmems[id].lock);
+
+    memset((char*)r, 5, PGSIZE); // fill with junk
+    return (void *)r;
+  }
   release(&kmems[id].lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  // acquire memory from another cpu
+  for (int i = 1; i < NCPU; ++i) {
+    uint n_id = (id + i) % NCPU;
+    acquire(&kmems[n_id].lock);
+    r = kmems[n_id].freelist;
+    if (r) {
+      kmems[n_id].freelist = r->next;
+      release(&kmems[n_id].lock);
+
+      memset((char*)r, 5, PGSIZE); // fill with junk
+      return (void *)r;
+    }
+
+    release(&kmems[n_id].lock);
+  }
+
   return (void*)r;
 }
 
