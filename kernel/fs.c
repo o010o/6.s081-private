@@ -316,8 +316,9 @@ ilock(struct inode *ip)
 void
 iunlock(struct inode *ip)
 {
-  if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1)
+  if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1) {
     panic("iunlock");
+  }
 
   releasesleep(&ip->lock);
 }
@@ -739,7 +740,7 @@ skipelem(char *path, char *name)
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
 static struct inode*
-namex(char *path, int nameiparent, char *name)
+namex(char *path, int nameiparent, char *name, uint is_follow_link)
 {
   struct inode *ip, *next;
 
@@ -750,19 +751,23 @@ namex(char *path, int nameiparent, char *name)
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
+
     if(ip->type != T_DIR){
       iunlockput(ip);
       return 0;
     }
+
     if(nameiparent && *path == '\0'){
       // Stop one level early.
       iunlock(ip);
       return ip;
     }
+
     if((next = dirlookup(ip, name, 0)) == 0){
       iunlockput(ip);
       return 0;
     }
+
     iunlockput(ip);
     ip = next;
   }
@@ -777,11 +782,61 @@ struct inode*
 namei(char *path)
 {
   char name[DIRSIZ];
-  return namex(path, 0, name);
+  return namex(path, 0, name, 0);
+}
+
+struct inode *
+delink(struct inode *ip) {
+  // call this function before acquire lock of ip
+
+  // printf("delink begin\n");
+
+  // symbol link dont ref to a directory.
+  // So the element among path cant be a symbol link. Symbol link only appear at tail.
+  if (ip->type != T_SYMLINK) {
+    panic("delink:invalid parameter");
+  }
+
+  // follow the symbol link
+  uint DEPTH_LIMIT = 10;
+  uint depth = 0;
+  char ref[MAXPATH];
+ 
+  while (depth < DEPTH_LIMIT && ip->type == T_SYMLINK) {
+    int n = readi(ip, 0, (uint64)ref, 0, sizeof(ref));
+    if (n == 0 || n >= MAXPATH) {
+      // the length of content of symbol link is MAXPATH - 1
+      return 0;
+    }
+
+    iunlockput(ip);
+    ++depth;
+    ref[n] = 0;
+
+    // printf("depth:%d, cur_inode:%d, ref:%s\n", depth, ip->inum, ref);
+
+    ip = namei(ref);
+    if (ip == 0) {
+      return 0;
+    }
+
+    ilock(ip);
+
+    if (!(ip->type == T_SYMLINK || ip->type == T_FILE)) {
+      panic("name2: track symbol link failed");
+    }
+  }
+
+  if (ip->type == T_FILE) {
+    // printf("delink: find target file:%s\n", ref);
+    return ip;
+  }
+
+  return 0;
 }
 
 struct inode*
 nameiparent(char *path, char *name)
 {
-  return namex(path, 1, name);
+  return namex(path, 1, name, 0);
 }
