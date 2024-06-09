@@ -23,6 +23,23 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+/**
+ * @brief map file into current process.
+ * @param addr local virtual memory mapping to. 0
+ * @param length bytes need to map
+ * @param port readable/writeable/executable. FOR now, it is PROT_READ,PROT_WRITE or both.
+ * @param flags MAP_SHARED or MAP_PRIVATE.
+ * @param fd the file descriptor of the file to map.
+ * @param offset. 0.
+ * @retval return mapped address if success, -1 if failed.
+*/
+void* mmap(void *addr, uint64 length, int prot, int flags, int fd, uint64 offset);
+/**
+ * @brief 
+ * @param addr. start address of mapped virtual memory.
+ * @param length. the length of mapped virtual memory.
+*/
+int munmap(void *addr, uint64 length);
 
 // ulib.c
 int stat(const char*, struct stat*);

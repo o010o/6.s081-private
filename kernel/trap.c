@@ -38,6 +38,7 @@ usertrap(void)
 {
   int which_dev = 0;
 
+
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
@@ -68,9 +69,17 @@ usertrap(void)
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    // if sepc is in vma, we need to alloc physics memory for it, 
+    // and creat map
+    struct vma *vma = vma_find(r_stval());
+    if (vma == 0) {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    } else {
+      // printf("usertrap: ready to map, recall function now.scause=%p sepc=%p stval=%p\n", r_scause(), r_sepc(), r_stval());
+      vma_map(vma, r_stval());
+    }
   }
 
   if(p->killed)

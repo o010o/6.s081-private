@@ -82,9 +82,27 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+#define VMASIZE (16)
+struct vma {
+  uint8 used;
+
+  uint64 start;            // start of virtual address of this vma. page size(4096) alignment
+
+  // [start, start + length)
+
+  struct file *file;      // map to this file
+  uint   offset;          // vma start at off of file
+  uint64 length;          // number of bytes need to be mapped 
+  int prot;               // PROT_READ, PROT_WRITE
+  int flags;              // MAP_SHARED, MAP_PRIVATE
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
+  // dont recycle asigned virtual address for this lab
+  uint64 virtual_addr_tail;
+  struct vma vma[VMASIZE];
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state

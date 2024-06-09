@@ -4,7 +4,14 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc.h"
+
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
+
 #include "defs.h"
+
 
 struct cpu cpus[NCPU];
 
@@ -47,13 +54,16 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
   }
+
+  // virtual address for vma
+  p->virtual_addr_tail = PGROUNDDOWN(TRAPFRAME - 1);
 }
 
 // Must be called with interrupts disabled,
@@ -140,6 +150,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  p->virtual_addr_tail = PGROUNDDOWN(TRAPFRAME - 1);
 
   return p;
 }
@@ -281,6 +293,7 @@ fork(void)
     return -1;
   }
 
+
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
@@ -300,6 +313,18 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+
+  // np uses seprate vma physics memory
+  for (int i = 0; i < VMASIZE; ++i) {
+    if (p->vma[i].used) {
+      if (p->vma[i].file == 0) {
+        panic("fork: the file of a used vma[i] is empty");
+      }
+      memmove(&np->vma[i], &p->vma[i], sizeof(p->vma[i]));
+      np->vma[i].file = filedup(p->vma[i].file);
+    }
+  }
+  np->virtual_addr_tail = p->virtual_addr_tail;
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -339,6 +364,7 @@ reparent(struct proc *p)
 void
 exit(int status)
 {
+
   struct proc *p = myproc();
 
   if(p == initproc)
@@ -350,6 +376,13 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // free vma to release recourse
+  for (int i = 0; i < VMASIZE; ++i) {
+    if (p->vma[i].used) {
+      vma_free(&p->vma[i]);
     }
   }
 
@@ -652,5 +685,234 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+void vma_print(struct vma *vma) {
+  printf("used:%d, start:%p, file:%p, offset:%p, length:%p, prot:%d, flags:%d\n",
+     vma->used, vma->start, vma->file, vma->offset, vma->length, vma->prot, vma->flags);
+}
+
+struct vma* vma_find(uint64 va) {
+  struct vma *vma = myproc()->vma;
+  for (int i = 0; i < VMASIZE; ++i) {
+    if (vma[i].used == 0) {
+      continue;
+    }
+    if (vma[i].start <= va && va < vma[i].start + vma[i].length) {
+      return &vma[i];
+    }
+  }
+  return 0;
+}
+
+struct vma* vma_new() {
+  struct vma *vma = myproc()->vma;
+  for (int i = 0; i < VMASIZE; ++i) {
+    if (vma[i].used == 0) {
+      vma[i].used = 1;
+      return &vma[i];
+    }
+  }
+  return 0;
+}
+
+static uint64 get_virtual_address(struct proc *proc, uint64 length) {
+  proc->virtual_addr_tail = PGROUNDDOWN(proc->virtual_addr_tail - length);
+  return proc->virtual_addr_tail;
+}
+
+void vma_init(struct vma *vma, struct proc *proc, void *addr, uint64 length, int prot, int flags, struct file *file, uint64 offset) {
+  // we need to chose a unsed virtual memory if addr is zero
+  // use laze allocate
+  if (vma == 0 || file == 0) {
+    panic("vma_init: empty pointer");
+  }
+
+  if (addr != 0) {
+    panic("vma_init: not support specific virtual memory address for now");
+  }
+
+  if (vma->used == 0 || vma->file != 0) {
+    panic("vma_init: init a non-empty vma");
+  }
+  
+  // init it
+  vma->length = length;
+
+  vma->prot = PTE_U;
+  if (prot & PROT_READ) {
+    vma->prot = vma->prot | PTE_R;
+  }
+  if (prot & PROT_WRITE) {
+    vma->prot = vma->prot | PTE_W;
+  }
+
+  vma->flags = flags;
+  vma->file = filedup(file);
+  vma->offset = offset;
+
+  vma->start = get_virtual_address(proc, length);
+}
+
+void vma_free(struct vma *vma) {
+  if (vma == 0) {
+    panic("vma_free: empty vma");
+  }
+
+  if (vma->used == 0) {
+    return;
+  }
+
+  if (vma->length != 0 && vma->file) {
+    // clear the last map in page table of current process, 
+    vma_unmap_multi(vma, vma->start, vma->length);
+  }
+
+  if (vma->file) {
+    fileclose(vma->file);
+  }
+
+  // clear vma
+  memset(vma, 0, sizeof(struct vma));
+}
+
+static inline int vma_is_addr_in(struct vma *vma, uint64 va, uint length) {
+  return vma->start <= va && va <= vma->start + length;
+}
+
+static void vma_flash(struct vma *vma, uint64 va) {
+  if (!(vma->start <= va && va < vma->start + vma->length)) {
+    return;
+  }
+
+  int len = PGSIZE;
+  if (PGROUNDDOWN(va) == PGROUNDDOWN(vma->start + vma->length - 1)) {
+    len = vma->start + vma->length - PGROUNDDOWN(vma->start + vma->length - 1);
+  }
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  int writed = 0;
+  int n = 0;
+  uint64 start = va - vma->start +  vma->offset;
+
+  while(writed < len){
+    int n1 = len - writed;
+    if(n1 > max)
+      n1 = max;
+
+    begin_op();
+    ilock(vma->file->ip);
+
+    n = writei(vma->file->ip, 1, va + writed, start + writed, n1);
+
+    iunlock(vma->file->ip);
+    end_op();
+
+    if(n != n1){
+      // error from writei
+      break;
+    }
+
+    writed += n;
+  }
+}
+
+void vma_unmap_single(struct vma *vma, uint64 va) {
+  // only unmap first or the last page
+  uint64 last_page_addr = PGROUNDDOWN(vma->start + vma->length - 1);
+  if (!(PGROUNDDOWN(va) == vma->start || PGROUNDDOWN(va) == last_page_addr)) {
+    panic("vma_unmap: invalid virtual address");
+  }
+
+  struct proc *proc = myproc();
+
+  uint64 pa = walkaddr(proc->pagetable, va);
+  if (pa == 0) {
+    return;
+  }
+
+  if (vma->flags & MAP_SHARED) {
+    // write page back to disk if page is dirty, for simplify, write back all page without checking
+    vma_flash(vma, PGROUNDDOWN(va));
+  }
+
+  // remove map between va and pa in page table of current process.
+  uvmunmap(proc->pagetable, PGROUNDDOWN(va), 1, 1);
+
+  // update start, length, offset
+  if (va == vma->start) {
+    vma->start += PGSIZE;
+    vma->offset += PGSIZE;
+  }
+  if (vma->length > PGSIZE) {
+    vma->length -= PGSIZE;
+  } else {
+    vma->length = 0;
+  }
+}
+
+// unmap any page which contains address either byte whose address in [va, va + length - 1]
+// va should be aligned
+void vma_unmap_multi(struct vma *vma, uint64 va, uint64 length) {
+  if (!vma_is_addr_in(vma, va, length)) {
+    panic("vma_unmap:invalid region of unmap");
+  } 
+
+  if (va % PGSIZE != 0) {
+    panic("vma_unmap:not aligned");
+  }
+
+  if (va == vma->start) {
+    uint64 i = va;
+    while (i < va + length) {
+      vma_unmap_single(vma, i);
+      i += PGSIZE;
+    }
+  } else if (va + length - 1 == vma->start + vma->length - 1) {
+    uint64 i = PGROUNDDOWN(va + length - 1);
+    while (i >= va) {
+      vma_unmap_single(vma, i);
+      i -= PGSIZE;
+    }
+  } else {
+    panic("vma_unmap:not head or tail");
+  }
+
+}
+
+// add a new map to vma, va should be aligned, length dont need to be aligned
+void vma_map(struct vma *vma, uint64 va) {
+  if (vma == 0 || vma->used == 0 || vma->file == 0) {
+    panic("vma_map:invalid vma");
+  }
+
+  if (!(vma->start <= va && va < vma->start + vma->length)) {
+    panic("vma_map:invalid virtual address");
+  }
+
+  int n = 0;
+
+  // for this lab, MAP_SHARED dont have to share same physics memory.
+  // MAP_SHARED means write back data to file when unmapping.
+
+  uint64 page_start = PGROUNDDOWN(va);
+
+  struct proc *proc = myproc();
+
+  uint64 new_mem = (uint64)kalloc();
+  memset((void *)new_mem, 0, PGSIZE);
+  // read at most PGSIZE to new_mem
+  ilock(vma->file->ip);
+
+  n = readi(vma->file->ip, 0, new_mem, vma->offset + page_start - vma->start, PGSIZE);
+
+  iunlock(vma->file->ip);
+  if (n < 0) {
+    panic("vma_map:readi failed");
+  }
+  
+
+  if (mappages(proc->pagetable, page_start, n, new_mem, vma->prot) < 0) {
+    panic("vma_map:mappage failed");
   }
 }
